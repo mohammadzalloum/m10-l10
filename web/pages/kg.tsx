@@ -1,8 +1,8 @@
 import { useState } from "react";
+import { useRouter } from "next/router";
 
+import { API_URL, authFetch } from "../lib/api";
 import type { KGResponse } from "../lib/types";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 function formatCell(value: unknown): string {
   if (value === null || value === undefined) {
@@ -55,6 +55,14 @@ function formatDetail(detail: unknown): string {
 }
 
 async function errorMessageFor(response: Response): Promise<string> {
+  if (response.status === 401) {
+    return "Please log in to continue.";
+  }
+
+  if (response.status === 403) {
+    return "Insufficient scope for this action.";
+  }
+
   if (response.status === 503) {
     return "The backend is starting up — please try again in a moment.";
   }
@@ -69,6 +77,8 @@ async function errorMessageFor(response: Response): Promise<string> {
 }
 
 export default function KgPage() {
+  const router = useRouter();
+
   const [question, setQuestion] = useState("");
   const [result, setResult] = useState<KGResponse | null>(null);
   const [error, setError] = useState("");
@@ -80,13 +90,18 @@ export default function KgPage() {
     setResult(null);
 
     try {
-      const response = await fetch(`${API_URL}/kg/query`, {
+      const response = await authFetch(`${API_URL}/kg/query`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ question }),
       });
+
+      if (response.status === 401) {
+        await router.push("/login");
+        return;
+      }
 
       if (!response.ok) {
         setError(await errorMessageFor(response));

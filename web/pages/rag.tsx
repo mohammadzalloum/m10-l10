@@ -1,8 +1,8 @@
 import { useState } from "react";
+import { useRouter } from "next/router";
 
+import { API_URL, authFetch } from "../lib/api";
 import type { RAGResponse } from "../lib/types";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 function formatDetail(detail: unknown): string {
   if (typeof detail === "string") {
@@ -29,6 +29,14 @@ function formatDetail(detail: unknown): string {
 }
 
 async function errorMessageFor(response: Response): Promise<string> {
+  if (response.status === 401) {
+    return "Please log in to continue.";
+  }
+
+  if (response.status === 403) {
+    return "Insufficient scope for this action.";
+  }
+
   if (response.status === 503) {
     return "The backend is starting up — please try again in a moment.";
   }
@@ -57,6 +65,8 @@ function renderAnswerWithCitationMarkers(answer: string) {
 }
 
 export default function RagPage() {
+  const router = useRouter();
+
   const [question, setQuestion] = useState("");
   const [result, setResult] = useState<RAGResponse | null>(null);
   const [error, setError] = useState("");
@@ -68,13 +78,18 @@ export default function RagPage() {
     setResult(null);
 
     try {
-      const response = await fetch(`${API_URL}/rag/answer`, {
+      const response = await authFetch(`${API_URL}/rag/answer`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ question, k: 4 }),
       });
+
+      if (response.status === 401) {
+        await router.push("/login");
+        return;
+      }
 
       if (!response.ok) {
         setError(await errorMessageFor(response));
