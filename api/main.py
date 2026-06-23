@@ -14,46 +14,71 @@ Discipline gates the autograder enforces:
   within 2 seconds; failure → 503.
 - `/healthz` does NOT touch Neo4j or Weaviate.
 """
+from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from typing import Any
 
 import spacy
 import weaviate
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from neo4j import GraphDatabase
+from passlib.context import CryptContext
 from sentence_transformers import SentenceTransformer
 
+from .auth import (
+    create_access_token,
+    verify_api_key_or_jwt,
+    verify_jwt_admin_only,
+)
 from .deps import get_embedder, get_generator, get_nlp, get_session, get_weaviate
 from .kg import UnsupportedQueryError, wrap_kg_query
 from .m8_rag import load_generator
-from .nlp import extract_entities
-from .rag import compose_rag
-from .settings import Settings
-from .w9b_mapper.shapes import SUPPORTED_PATTERNS
 from .models import (
     ExtractRequest,
     ExtractResponse,
     HealthResponse,
     KGRequest,
     KGResponse,
+    LoginRequest,
     RAGRequest,
     RAGResponse,
     ReadyDetail,
+    TokenResponse,
     UnsupportedQueryDetail,
 )
+from .nlp import extract_entities
+from .rag import compose_rag
+from .settings import Settings
+from .w9b_mapper.shapes import SUPPORTED_PATTERNS
+
+
+# Dev-only user fixture for the stretch.
+# Production user storage is intentionally out of scope for this assignment.
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+DEV_USERS: dict[str, dict[str, str]] = {
+    "admin": {
+        "username": "admin",
+        # Dev fixture password: admin
+        # The password is verified through passlib's bcrypt verifier.
+        "password_hash": pwd_context.hash("admin"),
+    }
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Process-scoped resource setup and teardown.
+    """Load process-scoped resources once.
 
-    Heavy resources are created once per process, not per request:
-    - spaCy pipeline for /extract
-    - Neo4j driver for /kg/query and /readyz
-    - Weaviate client for /rag/answer and /readyz
-    - flan-t5-base generator for RAG
-    - sentence-transformers embedder for query vectors
+    Heavy resources should not be created per request:
+    - spaCy NLP pipeline
+    - Neo4j driver
+    - Weaviate client
+    - RAG generator
+    - sentence-transformers embedder
     """
     settings = Settings()
 
@@ -89,80 +114,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.post("/extract", response_model=ExtractResponse)
-def extract(req: ExtractRequest, nlp=Depends(get_nlp)) -> ExtractResponse:
-    """Run spaCy NER on the input text; return entities ordered by `start`.
-
-    Returns ExtractResponse with entities sorted by `start` ascending.
-    """
-    entities = extract_entities(req.text, nlp)
-    return ExtractResponse(entities=entities)
-
-
-@app.post("/kg/query", response_model=KGResponse)
-def kg_query(req: KGRequest, session=Depends(get_session)) -> KGResponse:
-    """Run the W9B mapper and execute the resulting Cypher.
-
-    Returns KGResponse(cypher=..., rows=[r.data() for r in session.run(...)], count=len(rows)).
-    UnsupportedQueryError → HTTPException(422, detail=UnsupportedQueryDetail(...).model_dump()).
-    """
-    try:
-        cypher, params = wrap_kg_query(req.question)
-    except UnsupportedQueryError:
-        detail = UnsupportedQueryDetail(
-            reason="unsupported_question",
-            supported_patterns=SUPPORTED_PATTERNS,
-        )
-        raise HTTPException(status_code=422, detail=detail.model_dump())
-
-    try:
-        # Real Neo4j sessions accept both the Cypher string and params.
-        result = session.run(cypher, params)
-    except TypeError:
-        # Backend tests use a small fake session whose run() accepts only
-        # the Cypher string. This keeps the endpoint testable without
-        # changing production behavior.
-        result = session.run(cypher)
-
-    rows = [record.data() for record in result]
-
-    return KGResponse(
-        cypher=cypher,
-        rows=rows,
-        count=len(rows),
-    )
-
-
-@app.post("/rag/answer", response_model=RAGResponse)
-def rag_answer(
-    req: RAGRequest,
-    weaviate_client=Depends(get_weaviate),
-    generator=Depends(get_generator),
-    embedder=Depends(get_embedder),
-) -> RAGResponse:
-    """Retrieve → assemble → generate → cite → grounding check.
-
-    Returns RAGResponse with citations populated when a grounded answer
-    is available, or the SENTINEL with empty citations when retrieval
-    or citation extraction fails.
-    """
-    result = compose_rag(
-        question=req.question,
-        embedder=embedder,
-        weaviate_client=weaviate_client,
-        generator=generator,
-        k=req.k,
-    )
-
-    return RAGResponse.model_validate(result)
-
-
-
-@app.get("/healthz", response_model=HealthResponse)
-def healthz() -> HealthResponse:
-    """Liveness probe. Must NOT touch Neo4j or Weaviate."""
-    return HealthResponse(status="ok")
-
 
 def _consume_neo4j_result(result) -> None:
     """Consume a Neo4j result in a way that also works with test fakes."""
@@ -170,9 +121,17 @@ def _consume_neo4j_result(result) -> None:
         result.consume()
         return
 
-    # Some tests use a plain iterable fake result.
     for _ in result:
         pass
+
+
+@app.get("/healthz", response_model=HealthResponse)
+def healthz() -> HealthResponse:
+    """Liveness probe.
+
+    This must stay public and must not touch Neo4j or Weaviate.
+    """
+    return HealthResponse(status="ok")
 
 
 @app.get("/readyz", response_model=ReadyDetail)
@@ -182,8 +141,7 @@ def readyz(
 ) -> ReadyDetail:
     """Dependency readiness probe.
 
-    Returns 200 only when Neo4j and Weaviate both pass.
-    Returns 503 with structured detail when either dependency fails.
+    This stays public so orchestration systems can check dependency health.
     """
     statuses = {
         "neo4j": "ok",
@@ -208,3 +166,100 @@ def readyz(
         raise HTTPException(status_code=503, detail=detail.model_dump())
 
     return detail
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(req: LoginRequest) -> TokenResponse:
+    """Authenticate the dev user and issue a JWT access token."""
+    user = DEV_USERS.get(req.username)
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        )
+
+    if not pwd_context.verify(req.password, user["password_hash"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        )
+
+    token = create_access_token(subject=user["username"])
+
+    return TokenResponse(access_token=token, token_type="bearer")
+
+
+@app.get("/admin/echo")
+def admin_echo(payload: dict[str, Any] = Depends(verify_jwt_admin_only)) -> dict[str, Any]:
+    """JWT-only admin endpoint.
+
+    A valid API key alone must not be enough for this route.
+    """
+    return payload
+
+
+@app.post("/extract", response_model=ExtractResponse)
+def extract(
+    req: ExtractRequest,
+    nlp=Depends(get_nlp),
+    auth=Depends(verify_api_key_or_jwt),
+) -> ExtractResponse:
+    """Run named entity recognition.
+
+    Access policy: valid API key OR valid JWT.
+    """
+    entities = extract_entities(req.text, nlp)
+    return ExtractResponse(entities=entities)
+
+
+@app.post("/kg/query", response_model=KGResponse)
+def kg_query(
+    req: KGRequest,
+    session=Depends(get_session),
+    auth=Depends(verify_api_key_or_jwt),
+) -> KGResponse:
+    """Run a deterministic KG query.
+
+    Access policy: valid API key OR valid JWT.
+    """
+    try:
+        cypher, params = wrap_kg_query(req.question)
+    except UnsupportedQueryError:
+        detail = UnsupportedQueryDetail(
+            reason="unsupported_question",
+            supported_patterns=SUPPORTED_PATTERNS,
+        )
+        raise HTTPException(status_code=422, detail=detail.model_dump())
+
+    try:
+        result = session.run(cypher, params)
+    except TypeError:
+        result = session.run(cypher)
+
+    rows = [record.data() for record in result]
+
+    return KGResponse(cypher=cypher, rows=rows, count=len(rows))
+
+
+@app.post("/rag/answer", response_model=RAGResponse)
+def rag_answer(
+    req: RAGRequest,
+    weaviate_client=Depends(get_weaviate),
+    generator=Depends(get_generator),
+    embedder=Depends(get_embedder),
+    auth=Depends(verify_api_key_or_jwt),
+) -> RAGResponse:
+    """Generate a grounded RAG answer.
+
+    Access policy: valid API key OR valid JWT.
+    """
+    result = compose_rag(
+        question=req.question,
+        embedder=embedder,
+        weaviate_client=weaviate_client,
+        generator=generator,
+        k=req.k,
+    )
+
+    return RAGResponse.model_validate(result)
