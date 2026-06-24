@@ -2,19 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-# Install Python dependencies first for better Docker layer caching.
-COPY api/requirements.txt ./api/requirements.txt
+# Copy requirements first so Docker can cache dependency installation.
+COPY requirements.txt requirements.txt
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir -r api/requirements.txt \
-    && python -m pip install --no-cache-dir \
-       https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+    && python -m pip install --no-cache-dir -r requirements.txt
 
-# Copy the backend package as /app/api so package-relative imports work.
-COPY api ./api
+RUN python -m spacy download en_core_web_sm
+
+COPY . .
 
 EXPOSE 8000
 

@@ -1,5 +1,8 @@
+.git
+.gitignore
 .env
 api/.env
+web/.env.local
 tests
 .venv
 **/.venv
@@ -7,6 +10,10 @@ __pycache__
 **/__pycache__
 *.pyc
 .pytest_cache
+web/node_modules
+web/.next
+web/playwright-report
+web/test-results
 .DS_Store
 .idea
 .vscode
