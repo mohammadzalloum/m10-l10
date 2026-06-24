@@ -40,11 +40,6 @@ jobs:
           PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
         ports:
           - 8080:8080
-        options: >-
-          --health-cmd "curl -f http://localhost:8080/v1/.well-known/ready"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 24
     env:
       NEO4J_URI: bolt://localhost:7687
       NEO4J_USER: neo4j
@@ -74,5 +69,20 @@ jobs:
           # ("update api/requirements.txt") rather than a CI ImportError.
           pip install 'python-jose[cryptography]>=3,<4' 'passlib[bcrypt]>=1.7,<2'
           python -m spacy download en_core_web_sm
+      - name: Wait for Weaviate
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8080/v1/.well-known/ready; then
+              echo "Weaviate is ready"
+              exit 0
+            fi
+            echo "Waiting for Weaviate..."
+            sleep 2
+          done
+
+          echo "Weaviate did not become ready"
+          docker ps -a
+          exit 1
+
       - name: Stretch auth autograder
         run: pytest tests/auth -v --tb=short
