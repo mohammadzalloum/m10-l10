@@ -1,115 +1,163 @@
 """Pydantic request/response models for the recipe service.
 
-These are the typed-boundary contracts. They must mirror the TypeScript
-interfaces in `web/lib/types.ts` exactly — drift produces silent render
-failures in the Next.js frontend.
+These models are the typed API boundary for the FastAPI backend.
+They must mirror the TypeScript interfaces in `web/lib/types.ts`
+exactly. Field-name drift can make the frontend render empty results
+without an obvious backend error.
 """
-from typing import List, Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --- /extract --------------------------------------------------------
 
+
 class ExtractRequest(BaseModel):
     """Request body for POST /extract.
 
-    The request field has a length constraint that gates 422 on empty
-    or oversized input.
+    Contract:
+    - text is required.
+    - text must not be empty.
+    - text must be at most 5000 characters.
     """
-    # TODO: declare the request body field with a Field(...) length
-    #       constraint.
-    pass
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(..., min_length=1, max_length=5000)
 
 
 class Entity(BaseModel):
-    """A single named-entity span.
+    """One named-entity span returned by spaCy.
 
-    Field names must match the corresponding TypeScript Entity
-    interface in `web/lib/types.ts` exactly.
+    start and end are character offsets, not token indexes.
     """
-    # TODO: declare the span's text, label, and start/end character
-    #       offsets.
-    pass
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    label: str
+    start: int = Field(..., ge=0)
+    end: int = Field(..., ge=0)
 
 
 class ExtractResponse(BaseModel):
     """Response body for POST /extract.
 
-    Per the Evaluation Methodology, the returned list is ordered by
-    start offset ascending.
+    entities should be ordered by start offset ascending.
     """
-    # TODO: declare the field that carries the ordered list of entities.
-    pass
+    model_config = ConfigDict(extra="forbid")
+
+    entities: list[Entity]
 
 
 # --- /kg/query -------------------------------------------------------
 
+
 class KGRequest(BaseModel):
     """Request body for POST /kg/query.
 
-    The question field has a length constraint.
+    Contract:
+    - question is required.
+    - question must not be empty.
+    - question must be at most 500 characters.
     """
-    # TODO: declare the request field with a Field(...) length
-    #       constraint.
-    pass
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(..., min_length=1, max_length=500)
 
 
 class KGResponse(BaseModel):
-    """Response body for POST /kg/query."""
-    # TODO: declare the cypher string, the rows the driver returned,
-    #       and the row count.
-    pass
+    """Response body for POST /kg/query.
+
+    rows must be JSON-serializable dictionaries produced from
+    Neo4j records via record.data().
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    cypher: str
+    rows: list[dict[str, Any]]
+    count: int = Field(..., ge=0)
 
 
 class UnsupportedQueryDetail(BaseModel):
-    """Structured detail returned on 422 from /kg/query."""
+    """Structured 422 detail body for unsupported KG questions."""
+    model_config = ConfigDict(extra="forbid")
+
     reason: Literal["unsupported_question"]
-    supported_patterns: List[str]
+    supported_patterns: list[str]
 
 
 # --- /rag/answer -----------------------------------------------------
 
+
 class RAGRequest(BaseModel):
     """Request body for POST /rag/answer.
 
-    The question field has a length constraint; `k` is a bounded
-    integer with a default.
+    Contract:
+    - question is required.
+    - question must not be empty.
+    - question must be at most 500 characters.
+    - k defaults to 4 and must be between 1 and 10.
     """
-    # TODO: declare the question field with a Field(...) length
-    #       constraint and a bounded integer `k` with a default.
-    pass
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(..., min_length=1, max_length=500)
+    k: int = Field(default=4, ge=1, le=10)
 
 
 class Citation(BaseModel):
-    """One citation: chunk id and retrieval score.
+    """One citation pointing back to a retrieved Weaviate chunk."""
+    model_config = ConfigDict(extra="forbid")
 
-    Field names must match the TypeScript Citation interface.
-    """
-    # TODO: declare the citation's chunk identifier and retrieval score.
-    pass
+    chunk_id: int
+    score: float = Field(..., ge=0.0, le=1.0)
 
 
 class RAGResponse(BaseModel):
     """Response body for POST /rag/answer.
 
-    Grounding contract: when `answer` is not the empty-retrieval
-    sentinel, `len(citations) > 0` is required.
+    If answer is not the sentinel refusal, citations should contain
+    at least one valid source chunk.
     """
-    # TODO: declare the answer string, the list of citations, and the
-    #       confidence score.
-    pass
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str
+    citations: list[Citation]
+    confidence: float = Field(..., ge=0.0, le=1.0)
 
 
 # --- Health / readiness ---------------------------------------------
 
+
 class HealthResponse(BaseModel):
-    """Liveness response."""
-    # TODO: declare the single field returned by /healthz.
-    pass
+    """Liveness response for GET /healthz.
+
+    /healthz is process-level and should not depend on Neo4j or Weaviate.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"]
 
 
 class ReadyDetail(BaseModel):
-    """Readiness detail naming each backend's status."""
+    """Readiness detail for GET /readyz.
+
+    Used both for successful readiness responses and structured 503
+    error details when a dependency is down.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     neo4j: str
     weaviate: str
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(..., min_length=1, max_length=100)
+    password: str = Field(..., min_length=1, max_length=1000)
+
+
+class TokenResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
