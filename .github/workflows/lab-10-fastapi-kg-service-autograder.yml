@@ -33,11 +33,6 @@ jobs:
           PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
         ports:
           - 8080:8080
-        options: >-
-          --health-cmd "curl -f http://localhost:8080/v1/.well-known/ready"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 24
     env:
       NEO4J_URI: bolt://localhost:7687
       NEO4J_USER: neo4j
@@ -58,6 +53,21 @@ jobs:
           # constructs a malformed URL on some spaCy/pip combinations
           # (.../download/-en_core_web_sm/-en_core_web_sm.tar.gz → 404).
           pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+      - name: Wait for Weaviate
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8080/v1/.well-known/ready; then
+              echo "Weaviate is ready"
+              exit 0
+            fi
+            echo "Waiting for Weaviate..."
+            sleep 2
+          done
+
+          echo "Weaviate did not become ready"
+          docker ps -a
+          exit 1
+
       - name: Backend autograder
         run: pytest tests/backend tests/frontend/test_compose.py tests/frontend/test_dockerfiles.py tests/frontend/test_typescript_interfaces.py -v --tb=short
 
